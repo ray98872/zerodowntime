@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Zero-downtime blue-green deployment of a GenAI Copilot RAG index on Azure Container Apps — live interactive demo by Raihan Mahbub" />
+  <title>Zero-Downtime Blue-Green Deployment · Ray Mahbub</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..600;1,9..144,300..600&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            bg: "#0a0a0b", cream: "#f2f0ea", faint: "#98948a", dim: "#5b574e",
+            copper: "#c97e4e", coppersoft: "#e0a075",
+            slotblue: "#5b9dd9", slotgreen: "#5dbf8a",
+            line: "rgba(242,240,234,0.08)",
+          },
+          fontFamily: {
+            display: ["Fraunces", "Georgia", "serif"],
+            body: ["Inter", "ui-sans-serif", "system-ui", "sans-serif"],
+            mono: ["JetBrains Mono", "ui-monospace", "monospace"],
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    html { background-color: #0a0a0b; }
+    body { -webkit-font-smoothing: antialiased; }
+    .grain { position: fixed; inset: 0; z-index: 60; pointer-events: none; opacity: 0.04;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
+    .halo { position: fixed; inset: 0; z-index: 0; pointer-events: none;
+      background: radial-gradient(ellipse 70% 45% at 50% -5%, rgba(201,126,78,0.07), transparent); }
+    .panel { border-radius: 20px; border: 1px solid rgba(242,240,234,0.08);
+      background: linear-gradient(180deg, rgba(242,240,234,0.045), rgba(242,240,234,0.018));
+      box-shadow: 0 -24px 70px -32px rgba(242,240,234,0.07) inset; }
+    .slot { transition: border-color .4s, box-shadow .4s, opacity .4s; }
+    .slot.receiving-blue { border-color: rgba(91,157,217,0.5); box-shadow: 0 0 40px -12px rgba(91,157,217,0.35); }
+    .slot.receiving-green { border-color: rgba(93,191,138,0.5); box-shadow: 0 0 40px -12px rgba(93,191,138,0.35); }
+    .slot.inactive { opacity: 0.45; }
+    .logline { animation: fadeline .3s ease-out; }
+    @keyframes fadeline { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+    .pulse-dot { animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+    #logbox::-webkit-scrollbar { width: 4px; }
+    #logbox::-webkit-scrollbar-thumb { background: rgba(242,240,234,0.15); border-radius: 2px; }
+  </style>
+</head>
+<body class="bg-bg font-body text-cream min-h-screen">
+  <div class="grain"></div>
+  <div class="halo"></div>
+
+  <main class="relative z-10 mx-auto max-w-6xl px-5 py-12 sm:py-16">
+
+    <!-- Header -->
+    <header class="mb-10">
+      <p class="font-mono text-[11px] uppercase tracking-[0.2em] text-copper">live infrastructure demo · azure container apps</p>
+      <h1 class="font-display mt-3 text-3xl font-light sm:text-5xl">Zero-Downtime <span class="italic text-coppersoft">Blue-Green</span> Deployment</h1>
+      <p class="mt-4 max-w-2xl text-[14px] leading-relaxed text-faint">
+        Updating a live GenAI Copilot's RAG index without dropping a single user request.
+        A new <span class="text-slotgreen">Green</span> revision is deployed alongside the live
+        <span class="text-slotblue">Blue</span> revision, health-verified on its private URL, then traffic
+        is shifted atomically at the ingress layer. Built in C# / .NET, containerised, deployed by GitHub Actions.
+      </p>
+    </header>
+
+    <!-- Controls -->
+    <div class="mb-6 flex flex-wrap items-center gap-3">
+      <button id="deployBtn" onclick="runDeployment()"
+        class="rounded-lg border border-copper/50 bg-copper/10 px-5 py-2.5 font-mono text-[12px] text-coppersoft transition hover:bg-copper/20 disabled:cursor-not-allowed disabled:opacity-40">
+        ▶ git push — deploy new RAG index
+      </button>
+      <div class="flex items-center gap-2 font-mono text-[11px] text-dim">
+        <span class="pulse-dot inline-block h-1.5 w-1.5 rounded-full bg-slotgreen"></span>
+        <span id="statusText">steady state — serving from Blue (V1)</span>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 gap-4 lg:grid-cols-5">
+
+      <!-- Traffic visualisation -->
+      <section class="panel relative p-5 lg:col-span-3">
+        <p class="font-mono text-[11px] uppercase tracking-[0.18em] text-dim">traffic routing — live simulation</p>
+        <svg id="viz" viewBox="0 0 600 360" class="mt-2 w-full" aria-label="Animated traffic routing between blue and green deployment slots">
+          <!-- paths -->
+          <path id="p-client" d="M 95 180 C 160 180, 175 180, 240 180" fill="none" stroke="rgba(242,240,234,0.1)" stroke-width="1.5"/>
+          <path id="p-blue"  d="M 300 160 C 360 120, 390 100, 440 95" fill="none" stroke="rgba(91,157,217,0.25)" stroke-width="1.5"/>
+          <path id="p-green" d="M 300 200 C 360 240, 390 260, 440 265" fill="none" stroke="rgba(93,191,138,0.25)" stroke-width="1.5"/>
+
+          <!-- client -->
+          <g>
+            <rect x="30" y="148" width="65" height="64" rx="12" fill="rgba(242,240,234,0.04)" stroke="rgba(242,240,234,0.12)"/>
+            <text x="62" y="178" text-anchor="middle" font-size="20">👤</text>
+            <text x="62" y="200" text-anchor="middle" font-size="9" fill="#98948a" font-family="JetBrains Mono, monospace">users</text>
+          </g>
+
+          <!-- router -->
+          <g>
+            <rect x="240" y="142" width="80" height="76" rx="12" fill="rgba(201,126,78,0.08)" stroke="rgba(201,126,78,0.35)"/>
+            <text x="280" y="172" text-anchor="middle" font-size="18">⚖️</text>
+            <text x="280" y="192" text-anchor="middle" font-size="9" fill="#c97e4e" font-family="JetBrains Mono, monospace">ingress</text>
+            <text x="280" y="205" text-anchor="middle" font-size="8" fill="#5b574e" font-family="JetBrains Mono, monospace" id="splitLabel">100 / 0</text>
+          </g>
+
+          <!-- blue slot -->
+          <foreignObject x="440" y="45" width="150" height="105">
+            <div xmlns="http://www.w3.org/1999/xhtml" id="slotBlue" class="slot receiving-blue h-full rounded-xl border border-line bg-[rgba(91,157,217,0.05)] p-3">
+              <p class="font-mono text-[10px] uppercase tracking-wider text-slotblue">● blue slot</p>
+              <p class="font-display mt-1 text-[15px]" id="blueTitle">RAG Index V1</p>
+              <p class="font-mono text-[9px] text-dim" id="blueRev">rev: copilot-api--v1</p>
+              <div class="mt-2 h-1 w-full overflow-hidden rounded bg-white/5">
+                <div id="blueBar" class="h-full bg-slotblue transition-all duration-700" style="width:100%"></div>
+              </div>
+              <p class="mt-1 font-mono text-[9px] text-faint"><span id="bluePct">100</span>% of traffic</p>
+            </div>
+          </foreignObject>
+
+          <!-- green slot -->
+          <foreignObject x="440" y="215" width="150" height="105">
+            <div xmlns="http://www.w3.org/1999/xhtml" id="slotGreen" class="slot inactive h-full rounded-xl border border-line bg-[rgba(93,191,138,0.05)] p-3">
+              <p class="font-mono text-[10px] uppercase tracking-wider text-slotgreen">● green slot</p>
+              <p class="font-display mt-1 text-[15px]" id="greenTitle">RAG Index V2</p>
+              <p class="font-mono text-[9px] text-dim" id="greenRev">rev: (not deployed)</p>
+              <div class="mt-2 h-1 w-full overflow-hidden rounded bg-white/5">
+                <div id="greenBar" class="h-full bg-slotgreen transition-all duration-700" style="width:0%"></div>
+              </div>
+              <p class="mt-1 font-mono text-[9px] text-faint"><span id="greenPct">0</span>% of traffic</p>
+            </div>
+          </foreignObject>
+
+          <g id="dots"></g>
+        </svg>
+
+        <!-- counters -->
+        <div class="mt-1 grid grid-cols-3 gap-3 border-t border-line pt-4">
+          <div><p class="font-mono text-[10px] uppercase tracking-wider text-dim">requests served</p>
+            <p class="font-display text-xl text-cream" id="cServed">0</p></div>
+          <div><p class="font-mono text-[10px] uppercase tracking-wider text-dim">requests dropped</p>
+            <p class="font-display text-xl text-slotgreen" id="cDropped">0</p></div>
+          <div><p class="font-mono text-[10px] uppercase tracking-wider text-dim">availability</p>
+            <p class="font-display text-xl text-cream">100%</p></div>
+        </div>
+      </section>
+
+      <!-- Pipeline log -->
+      <section class="panel flex flex-col p-5 lg:col-span-2">
+        <p class="font-mono text-[11px] uppercase tracking-[0.18em] text-dim">ci/cd pipeline log</p>
+        <div id="logbox" class="mt-3 h-[330px] flex-1 space-y-1.5 overflow-y-auto rounded-lg border border-line bg-black/30 p-3 font-mono text-[10.5px] leading-relaxed">
+        </div>
+        <p class="mt-3 font-mono text-[10px] text-dim">github actions → ghcr.io → azure container apps (uksouth)</p>
+      </section>
+    </div>
+
+    <!-- Live API panel -->
+    <section class="panel mt-4 p-5">
+      <div class="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <p class="font-mono text-[11px] uppercase tracking-[0.18em] text-dim">query the real backend</p>
+          <p class="mt-1 text-[13px] text-faint">This calls the actual C# API running on Azure Container Apps — the response tells you which RAG index revision served it.</p>
+        </div>
+        <div class="flex gap-2">
+          <input id="qInput" type="text" placeholder="Ask the copilot…" value="What changed in this release?"
+            class="w-56 rounded-lg border border-line bg-black/30 px-3 py-2 font-mono text-[11px] text-cream placeholder:text-dim focus:border-copper/50 focus:outline-none sm:w-72" />
+          <button onclick="queryLiveApi()" class="rounded-lg border border-line bg-cream/5 px-4 py-2 font-mono text-[11px] text-cream transition hover:border-copper/40 hover:text-coppersoft">send</button>
+        </div>
+      </div>
+      <pre id="apiResult" class="mt-3 hidden overflow-x-auto rounded-lg border border-line bg-black/30 p-3 font-mono text-[10.5px] text-slotgreen"></pre>
+    </section>
+
+    <!-- How it works -->
+    <section class="mt-10 grid grid-cols-1 gap-4 sm:grid-cols-3">
+      <div class="panel p-5"><p class="font-mono text-[10px] uppercase tracking-wider text-copper">01 · deploy dark</p>
+        <p class="mt-2 text-[13px] leading-relaxed text-faint">GitHub Actions builds the new container and creates a Green revision in Azure Container Apps with <span class="text-cream">0% traffic</span>. Users never see it.</p></div>
+      <div class="panel p-5"><p class="font-mono text-[10px] uppercase tracking-wider text-copper">02 · verify in production</p>
+        <p class="mt-2 text-[13px] leading-relaxed text-faint">The pipeline pings the Green revision's <span class="font-mono text-cream">private revision URL</span> — real production infrastructure, zero user exposure.</p></div>
+      <div class="panel p-5"><p class="font-mono text-[10px] uppercase tracking-wider text-copper">03 · atomic cutover</p>
+        <p class="mt-2 text-[13px] leading-relaxed text-faint">Ingress traffic weights flip to <span class="text-cream">100% Green</span>. In-flight Blue requests drain gracefully. Rollback is one command away.</p></div>
+    </section>
+
+    <footer class="mt-12 border-t border-line pt-6 text-center font-mono text-[10px] text-dim">
+      <a href="https://github.com/ray98872/zerodowntime" id="repoLink" class="hover:text-coppersoft">source on github</a>
+      · c# / .net 8 · docker · github actions · azure container apps ·
+      <a href="https://ray98872.github.io/" class="hover:text-coppersoft">ray mahbub</a>
+    </footer>
+  </main>
+
+  <script>
+    // ===== CONFIG ====================================================
+    // The real Azure Container Apps URL.
+    const API_URL = "https://copilot-api.ambitiousmushroom-a6a0b714.uksouth.azurecontainerapps.io";
+    // =================================================================
+
+    const state = {
+      blueWeight: 100, greenWeight: 0,
+      blueVersion: 1, greenVersion: 2,
+      deploying: false, greenLive: false,
+      served: 0,
+    };
+
+    const $ = (id) => document.getElementById(id);
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    // ----- logging -----
+    const LEVEL_COLORS = { INFO: "#98948a", BUILD: "#c97e4e", DEPLOY: "#5b9dd9", TEST: "#e0a075", ROUTING: "#5dbf8a", SCALE: "#98948a", DONE: "#5dbf8a", WARN: "#d9a05b" };
+    function log(level, msg) {
+      const box = $("logbox");
+      const t = new Date().toLocaleTimeString("en-GB");
+      const line = document.createElement("div");
+      line.className = "logline";
+      line.innerHTML = `<span style="color:#5b574e">${t}</span> <span style="color:${LEVEL_COLORS[level] || "#98948a"}">[${level}]</span> <span style="color:#f2f0ea">${msg}</span>`;
+      box.appendChild(line);
+      box.scrollTop = box.scrollHeight;
+    }
+
+    // ----- traffic weights -----
+    function setWeights(blue, green) {
+      state.blueWeight = blue; state.greenWeight = green;
+      $("blueBar").style.width = blue + "%";  $("bluePct").textContent = blue;
+      $("greenBar").style.width = green + "%"; $("greenPct").textContent = green;
+      $("splitLabel").textContent = `${blue} / ${green}`;
+      $("slotBlue").classList.toggle("inactive", blue === 0);
+      $("slotGreen").classList.toggle("inactive", green === 0);
+      $("slotBlue").classList.toggle("receiving-blue", blue > 0);
+      $("slotGreen").classList.toggle("receiving-green", green > 0);
+    }
+
+    // ----- animated request dots -----
+    const pClient = $("p-client"), pBlue = $("p-blue"), pGreen = $("p-green");
+    const lenClient = pClient.getTotalLength(), lenBlue = pBlue.getTotalLength(), lenGreen = pGreen.getTotalLength();
+
+    function spawnDot() {
+      const toGreen = Math.random() * 100 < state.greenWeight;
+      const branch = toGreen ? pGreen : pBlue;
+      const branchLen = toGreen ? lenGreen : lenBlue;
+      const color = toGreen ? "#5dbf8a" : "#5b9dd9";
+      const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      dot.setAttribute("r", "3.2");
+      dot.setAttribute("fill", color);
+      dot.setAttribute("opacity", "0.9");
+      $("dots").appendChild(dot);
+
+      const D1 = 900, D2 = 900, start = performance.now();
+      function frame(now) {
+        const t = now - start;
+        if (t < D1) {
+          const p = pClient.getPointAtLength((t / D1) * lenClient);
+          dot.setAttribute("cx", p.x); dot.setAttribute("cy", p.y);
+        } else if (t < D1 + D2) {
+          const p = branch.getPointAtLength(((t - D1) / D2) * branchLen);
+          dot.setAttribute("cx", p.x); dot.setAttribute("cy", p.y);
+        } else {
+          dot.remove();
+          state.served++;
+          $("cServed").textContent = state.served.toLocaleString();
+          return;
+        }
+        requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+    }
+    setInterval(spawnDot, 480);
+
+    // ----- deployment simulation -----
+    async function runDeployment() {
+      if (state.deploying) return;
+      state.deploying = true;
+      $("deployBtn").disabled = true;
+
+      const fromV = state.greenLive ? state.greenVersion : state.blueVersion;
+      const toV = fromV + 1;
+      const sha = Math.random().toString(16).slice(2, 9);
+      // The slot currently live and the slot we deploy into
+      const liveIsBlue = !state.greenLive;
+      const targetSlot = liveIsBlue ? "Green" : "Blue";
+      const targetRevEl = liveIsBlue ? "greenRev" : "blueRev";
+      const targetTitleEl = liveIsBlue ? "greenTitle" : "blueTitle";
+
+      $("statusText").textContent = `deployment in progress — V${fromV} → V${toV}`;
+
+      log("INFO", `New code pushed to main (<span style="color:#c97e4e">${sha}</span>) — RAG index V${toV}`);
+      await sleep(1200);
+      log("BUILD", "Building Docker image <span style='color:#98948a'>backend/Dockerfile</span>…");
+      await sleep(1800);
+      log("BUILD", `Pushed ghcr.io/…/copilot-api:${sha}`);
+      await sleep(1000);
+      log("DEPLOY", `Creating ${targetSlot} revision <span style='color:#98948a'>copilot-api--v${toV}</span> with 0% traffic…`);
+      $(targetRevEl).textContent = `rev: copilot-api--v${toV}`;
+      $(targetTitleEl).textContent = `RAG Index V${toV}`;
+      await sleep(1600);
+      log("TEST", `Verifying ${targetSlot} slot health on its private revision URL…`);
+      await sleep(1400);
+      log("TEST", "GET /health → <span style='color:#5dbf8a'>200 OK</span> { status: 'Healthy' }");
+      await sleep(900);
+      log("ROUTING", `Switching traffic to ${targetSlot} — gradual ramp…`);
+
+      const ramp = [10, 25, 50, 75, 100];
+      for (const w of ramp) {
+        liveIsBlue ? setWeights(100 - w, w) : setWeights(w, 100 - w);
+        log("ROUTING", `Traffic split → Blue ${state.blueWeight}% / Green ${state.greenWeight}%`);
+        await sleep(1100);
+      }
+
+      const oldSlot = liveIsBlue ? "Blue" : "Green";
+      const oldRevEl = liveIsBlue ? "blueRev" : "greenRev";
+      log("SCALE", `Deactivating old ${oldSlot} revision copilot-api--v${fromV} (drained gracefully)…`);
+      $(oldRevEl).textContent = "rev: (deactivated)";
+      await sleep(1200);
+      log("DONE", `<b>V${toV} live. 0 requests dropped. Zero downtime.</b>`);
+
+      // book-keeping for next run
+      if (liveIsBlue) { state.greenVersion = toV; state.greenLive = true; state.blueVersion = toV + 1; }
+      else { state.blueVersion = toV; state.greenLive = false; state.greenVersion = toV + 1; }
+
+      $("statusText").textContent = `steady state — serving from ${targetSlot} (V${toV})`;
+      $("deployBtn").disabled = false;
+      state.deploying = false;
+    }
+
+    // ----- live API call -----
+    async function queryLiveApi() {
+      const out = $("apiResult");
+      out.classList.remove("hidden");
+      const q = encodeURIComponent($("qInput").value || "hello");
+      if (!API_URL) {
+        out.textContent = JSON.stringify({
+          answer: `Responding from RAG Index V${state.greenLive ? state.greenVersion : state.blueVersion}`,
+          servedBy: "simulated (set API_URL to hit the real Azure backend)",
+          timestampUtc: new Date().toISOString(),
+        }, null, 2);
+        return;
+      }
+      out.textContent = "→ querying Azure Container Apps…";
+      try {
+        const res = await fetch(`${API_URL}/query?q=${q}`);
+        out.textContent = JSON.stringify(await res.json(), null, 2);
+      } catch (e) {
+        out.textContent = "Backend unreachable (it scales to zero when idle — try again in ~10s).";
+      }
+    }
+
+    // boot log
+    (async () => {
+      log("INFO", "Pipeline dashboard initialised");
+      log("INFO", "Blue slot (V1) serving 100% of production traffic");
+      log("INFO", "Press <b>git push</b> above to trigger a zero-downtime deployment");
+    })();
+  </script>
+</body>
+</html>
