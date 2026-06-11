@@ -1,5 +1,9 @@
 var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddCors();
 var app = builder.Build();
+
+// The demo dashboard on GitHub Pages calls this API cross-origin.
+app.UseCors(p => p.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader());
 
 // The RAG index version this build serves. Baked in via env var at deploy
 // time so Blue (V1) and Green (V2) revisions answer differently.
