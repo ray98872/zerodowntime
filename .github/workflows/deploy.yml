@@ -1,0 +1,139 @@
+name: Blue-Green Deploy (Zero Downtime)
+
+on:
+  push:
+    branches: [main]
+    paths: ['backend/**', '.github/workflows/deploy.yml']
+  workflow_dispatch:
+    inputs:
+      rag_index_version:
+        description: 'RAG index version label (e.g. V2). Leave blank to auto-toggle V1/V2.'
+        required: false
+        default: ''
+
+env:
+  RESOURCE_GROUP: portfolio-bluegreen-rg
+  APP_NAME: copilot-api
+
+jobs:
+  build:
+    name: Build & push container (GHCR)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image name (GHCR requires lowercase)
+        id: meta
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/copilot-api" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ github.sha }}
+            ${{ steps.meta.outputs.image }}:latest
+
+  deploy:
+    name: Deploy Green → verify → switch traffic
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Identify current (Blue) revision and pin its traffic
+        id: blue
+        run: |
+          BLUE=$(az containerapp revision list -n $APP_NAME -g $RESOURCE_GROUP \
+            --query "[?properties.active && properties.trafficWeight>\`0\`].name | [0]" -o tsv)
+          # Fall back to latest active revision if traffic was on 'latest'
+          if [ -z "$BLUE" ]; then
+            BLUE=$(az containerapp revision list -n $APP_NAME -g $RESOURCE_GROUP \
+              --query "[?properties.active].name | [0]" -o tsv)
+          fi
+          echo "Blue (current) revision: $BLUE"
+          echo "name=$BLUE" >> "$GITHUB_OUTPUT"
+          # Pin 100% traffic to Blue so the new revision arrives with 0%
+          az containerapp ingress traffic set -n $APP_NAME -g $RESOURCE_GROUP \
+            --revision-weight "$BLUE=100" -o none
+
+          # Auto-toggle the RAG index version label (V1 <-> V2) unless overridden
+          CURRENT_V=$(az containerapp revision show -n $APP_NAME -g $RESOURCE_GROUP \
+            --revision "$BLUE" \
+            --query "properties.template.containers[0].env[?name=='RAG_INDEX_VERSION'].value | [0]" -o tsv || true)
+          INPUT_V="${{ github.event.inputs.rag_index_version }}"
+          if [ -n "$INPUT_V" ]; then NEW_V="$INPUT_V";
+          elif [ "$CURRENT_V" = "V1" ]; then NEW_V="V2";
+          else NEW_V="V1"; fi
+          echo "RAG index: $CURRENT_V -> $NEW_V"
+          echo "rag_version=$NEW_V" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure ingress targets app port 8080
+        run: |
+          az containerapp ingress update -n $APP_NAME -g $RESOURCE_GROUP \
+            --target-port 8080 -o none || true
+
+      - name: Deploy Green revision (0% traffic)
+        id: green
+        run: |
+          SUFFIX="g$(date +%y%m%d%H%M)-${GITHUB_SHA::6}"
+          az containerapp update -n $APP_NAME -g $RESOURCE_GROUP \
+            --image ${{ needs.build.outputs.image }}:${{ github.sha }} \
+            --revision-suffix "$SUFFIX" \
+            --set-env-vars RAG_INDEX_VERSION=${{ steps.blue.outputs.rag_version }} \
+            -o none
+          GREEN="$APP_NAME--$SUFFIX"
+          echo "Green revision: $GREEN"
+          echo "name=$GREEN" >> "$GITHUB_OUTPUT"
+
+      - name: Health-check Green revision (direct revision URL)
+        run: |
+          FQDN=$(az containerapp revision show -n $APP_NAME -g $RESOURCE_GROUP \
+            --revision ${{ steps.green.outputs.name }} --query properties.fqdn -o tsv)
+          echo "Pinging https://$FQDN/health ..."
+          for i in $(seq 1 30); do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://$FQDN/health" || true)
+            if [ "$CODE" = "200" ]; then
+              echo "Green is healthy:"
+              curl -s "https://$FQDN/health"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $CODE — retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::Green revision never became healthy. Traffic stays on Blue."
+          exit 1
+
+      - name: Switch 100% traffic to Green
+        run: |
+          az containerapp ingress traffic set -n $APP_NAME -g $RESOURCE_GROUP \
+            --revision-weight "${{ steps.green.outputs.name }}=100" -o none
+          echo "Traffic cut over to Green with zero downtime."
+
+      - name: Deactivate old Blue revision
+        run: |
+          az containerapp revision deactivate -n $APP_NAME -g $RESOURCE_GROUP \
+            --revision ${{ steps.blue.outputs.name }} -o none || true
+
+      - name: Smoke test production URL
+        run: |
+          FQDN=$(az containerapp show -n $APP_NAME -g $RESOURCE_GROUP \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          echo "Production response:"
+          curl -s "https://$FQDN/query?q=smoke-test"
