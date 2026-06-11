@@ -1,0 +1,6 @@
+azure-credentials.json
+infra/azure-credentials.json
+infra/provision-output.json
+**/bin/
+**/obj/
+.DS_Store
